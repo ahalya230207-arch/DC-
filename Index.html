@@ -1,0 +1,437 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Distributed Snapshot Simulator</title>
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #101827;
+    color: #f1f5f9;
+}
+
+header {
+    text-align: center;
+    padding: 25px 12px;
+    background: linear-gradient(120deg, #172554, #0369a1);
+}
+
+header h1 { margin: 0 0 10px; }
+
+main {
+    max-width: 1000px;
+    margin: auto;
+    padding: 18px;
+}
+
+.panel {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 18px;
+}
+
+h2 { color: #7dd3fc; }
+
+button {
+    padding: 11px 15px;
+    margin: 4px;
+    border: 0;
+    border-radius: 7px;
+    background: #0284c7;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+button:hover { background: #0369a1; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.reset { background: #475569; }
+
+.processes, .channels {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.process, .channel {
+    background: #0f172a;
+    padding: 14px;
+    border: 2px solid #475569;
+    border-radius: 9px;
+    overflow-wrap: anywhere;
+}
+
+.process { text-align: center; }
+.process h3 { color: #93c5fd; }
+
+.process.recorded {
+    border-color: #22c55e;
+    background: #12352e;
+}
+
+.channel { font-size: 14px; line-height: 1.7; }
+.channel strong { color: #fbbf24; }
+
+.status {
+    display: inline-block;
+    margin-top: 10px;
+    background: #334155;
+    padding: 7px 10px;
+    border-radius: 20px;
+}
+
+.log {
+    max-height: 240px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 13px;
+    line-height: 1.7;
+}
+
+.log div {
+    padding: 5px 0;
+    border-bottom: 1px solid #334155;
+}
+
+.result {
+    background: #0f172a;
+    border-left: 4px solid #22c55e;
+    border-radius: 6px;
+    padding: 14px;
+    margin-top: 12px;
+    line-height: 1.8;
+}
+
+.note { color: #cbd5e1; line-height: 1.7; }
+footer { text-align: center; color: #94a3b8; padding: 18px; }
+
+@media(max-width: 600px) {
+    .processes, .channels { grid-template-columns: 1fr; }
+    header h1 { font-size: 23px; }
+}
+</style>
+</head>
+
+<body>
+<header>
+    <h1>Distributed Snapshot Simulator</h1>
+    <p>Chandy–Lamport Algorithm | FIFO Channels</p>
+</header>
+
+<main>
+<section class="panel">
+    <h2>1. Simulation Controls</h2>
+    <button id="sendBtn">Send Application Message</button>
+    <button id="snapshotBtn">Initiate Snapshot</button>
+    <button id="stepBtn" disabled>Next Step →</button>
+    <button id="runBtn" disabled>Run All Steps</button>
+    <button id="resetBtn" class="reset">Reset</button>
+    <div id="status" class="status">Ready</div>
+    <p class="note">
+        Send a few messages, initiate the snapshot, and advance through
+        marker delivery. The simulator records process states and
+        in-transit messages on FIFO channels.
+    </p>
+</section>
+
+<section class="panel">
+    <h2>2. Distributed Processes</h2>
+    <div class="processes" id="processes"></div>
+    <h2>3. FIFO Communication Channels</h2>
+    <div class="channels" id="channels"></div>
+</section>
+
+<section class="panel">
+    <h2>4. Execution Log</h2>
+    <div class="log" id="log"></div>
+</section>
+
+<section class="panel">
+    <h2>5. Captured Global State</h2>
+    <div id="result" class="note">
+        The global snapshot will appear here when recording is complete.
+    </div>
+</section>
+
+<section class="panel">
+    <h2>6. Algorithm</h2>
+    <ol class="note">
+        <li>The initiator records its local process state.</li>
+        <li>It sends marker messages on its outgoing FIFO channels.</li>
+        <li>A process receiving its first marker records its local state
+            and sends markers on all its outgoing channels.</li>
+        <li>It records messages on each incoming channel until that
+            channel's marker is received.</li>
+        <li>The global snapshot is complete when all local states and
+            channel states have been recorded.</li>
+    </ol>
+    <p class="note">
+        Global State = all recorded process states + all recorded
+        in-transit channel messages.
+    </p>
+</section>
+</main>
+
+<footer>Distributed Systems Mini Project</footer>
+
+<script>
+const names = ["P1", "P2", "P3"];
+const channelNames = ["P1 → P2", "P2 → P3", "P3 → P1"];
+
+let counters, queues, localStates, channelStates;
+let recorded, recording, markerReceived, pending;
+let started, finished, messageNumber, eventNumber;
+
+const $ = id => document.getElementById(id);
+
+function log(message) {
+    const item = document.createElement("div");
+    item.textContent = (++eventNumber) + ". " + message;
+    $("log").prepend(item);
+}
+
+function status(message) {
+    $("status").textContent = message;
+}
+
+function init() {
+    counters = [0, 0, 0];
+    queues = [[], [], []];
+    localStates = [null, null, null];
+    channelStates = [[], [], []];
+    recorded = [false, false, false];
+    recording = [false, false, false];
+    markerReceived = [false, false, false];
+    pending = [];
+    started = false;
+    finished = false;
+    messageNumber = 0;
+    eventNumber = 0;
+
+    $("log").innerHTML = "";
+    $("result").textContent =
+        "No snapshot yet. Send messages and initiate a snapshot.";
+    $("sendBtn").disabled = false;
+    $("snapshotBtn").disabled = false;
+    $("stepBtn").disabled = true;
+    $("runBtn").disabled = true;
+
+    log("Three processes initialized.");
+    status("Ready");
+    render();
+}
+
+function render() {
+    $("processes").innerHTML = names.map((name, i) => `
+        <div class="process ${recorded[i] ? "recorded" : ""}">
+            <h3>${name}</h3>
+            Local counter: ${counters[i]}<br>
+            Snapshot: ${recorded[i] ? "Recorded ✓" : "Not recorded"}
+            ${recorded[i]
+                ? `<br>Saved counter: ${localStates[i]}`
+                : ""}
+        </div>
+    `).join("");
+
+    $("channels").innerHTML = channelNames.map((name, i) => {
+        const messages = queues[i].map(m =>
+            m.type === "marker" ? "🔵 MARKER" : "✉ " + m.label
+        );
+        return `
+            <div class="channel">
+                <strong>${name}</strong><br>
+                FIFO queue: ${messages.length
+                    ? messages.join(" → ")
+                    : "Empty"}<br>
+                Recorded channel state: ${
+                    channelStates[i].length
+                        ? channelStates[i].map(m => m.label).join(", ")
+                        : "Empty"
+                }<br>
+                Recording: ${recorded[(i + 1) % 3] &&
+                    !markerReceived[i] ? "Open" : "Closed"}
+            </div>`;
+    }).join("");
+}
+
+function sendApplicationMessage() {
+    if (started || finished) return;
+
+    // Deliver each application message immediately unless it is
+    // blocked behind a marker. This preserves FIFO order.
+    const from = messageNumber % 3;
+    const to = (from + 1) % 3;
+    const label = "M" + (++messageNumber);
+
+    counters[from]++;
+    queues[from].push({type: "app", from, to, label});
+
+    log(`${names[from]} sends ${label} to ${names[to]}.`);
+    deliverApplicationMessages(from);
+    render();
+}
+
+function deliverApplicationMessages(channel) {
+    const queue = queues[channel];
+
+    while (queue.length && queue[0].type === "app") {
+        const message = queue.shift();
+
+        if (recording[message.to]) {
+            channelStates[channel].push({label: message.label});
+            log(`${message.label} recorded in channel ${channelNames[channel]}.`);
+        }
+
+        counters[message.to]++;
+        log(`${message.label} delivered to ${names[message.to]}.`);
+    }
+}
+
+function initiateSnapshot() {
+    if (started || finished) return;
+
+    started = true;
+    $("sendBtn").disabled = true;
+    $("snapshotBtn").disabled = true;
+    $("stepBtn").disabled = false;
+    $("runBtn").disabled = false;
+
+    log("P1 initiates the snapshot.");
+    recordProcess(0);
+    status("Snapshot in progress");
+    render();
+}
+
+function recordProcess(p) {
+    if (recorded[p]) return;
+
+    recorded[p] = true;
+    recording[p] = true;
+    localStates[p] = counters[p];
+
+    log(`${names[p]} records local state: counter = ${counters[p]}.`);
+
+    // A process sends markers on every outgoing channel.
+    // This simulator has one outgoing channel per process.
+    queues[p].push({
+        type: "marker",
+        from: p,
+        to: (p + 1) % 3,
+        label: "MARKER"
+    });
+
+    log(`${names[p]} sends a marker to ${names[(p + 1) % 3]}.`);
+    pending.push(p);
+}
+
+function nextStep() {
+    if (finished) return;
+
+    if (pending.length === 0) {
+        completeIfReady();
+        return;
+    }
+
+    const channel = pending.shift();
+    const queue = queues[channel];
+
+    // FIFO messages before a marker must be delivered first.
+    deliverApplicationMessages(channel);
+
+    if (!queue.length || queue[0].type !== "marker") {
+        render();
+        return;
+    }
+
+    queue.shift();
+
+    const receiver = (channel + 1) % 3;
+    markerReceived[channel] = true;
+
+    log(`${names[receiver]} receives marker from ${names[channel]}.`);
+
+    if (!recorded[receiver]) {
+        // First marker: record state and send markers.
+        recordProcess(receiver);
+    }
+
+    // This marker closes the recording interval for this incoming
+    // channel at its receiving process.
+    recording[receiver] = false;
+
+    log(`Channel ${channelNames[channel]} recording is closed.`);
+
+    render();
+    completeIfReady();
+}
+
+function completeIfReady() {
+    const allRecorded = recorded.every(Boolean);
+    const allMarkers = markerReceived.every(Boolean);
+    const allQueuesEmpty = queues.every(q => q.length === 0);
+    const noPending = pending.length === 0;
+
+    if (allRecorded && allMarkers && allQueuesEmpty && noPending) {
+        finished = true;
+        $("stepBtn").disabled = true;
+        $("runBtn").disabled = true;
+        status("Global snapshot captured ✓");
+        showGlobalState();
+        log("Global snapshot recording completed.");
+    } else if (pending.length === 0 && !finished) {
+        status("Continue to the next event");
+    }
+}
+
+function runAll() {
+    let safety = 0;
+    while (!finished && pending.length && safety < 20) {
+        nextStep();
+        safety++;
+    }
+}
+
+function showGlobalState() {
+    let html = "<h3>Global Snapshot Captured Successfully</h3>";
+    html += '<div class="result"><strong>Local Process States</strong><br>';
+
+    names.forEach((name, i) => {
+        html += `${name}: counter = ${localStates[i]}<br>`;
+    });
+
+    html += "</div><div class='result'><strong>Channel States</strong><br>";
+
+    channelNames.forEach((name, i) => {
+        html += `${name}: ${
+            channelStates[i].length
+                ? channelStates[i].map(m => m.label).join(", ")
+                : "Empty"
+        }<br>`;
+    });
+
+    html += "</div><div class='result'><strong>Global State</strong><br>";
+    html += "G = {S(P1), S(P2), S(P3), C(P1→P2), ";
+    html += "C(P2→P3), C(P3→P1)}";
+    html += "<br>All local states and channel states are included.</div>";
+
+    $("result").innerHTML = html;
+}
+
+$("sendBtn").addEventListener("click", sendApplicationMessage);
+$("snapshotBtn").addEventListener("click", initiateSnapshot);
+$("stepBtn").addEventListener("click", nextStep);
+$("runBtn").addEventListener("click", runAll);
+$("resetBtn").addEventListener("click", init);
+
+init();
+</script>
+</body>
+</html>
